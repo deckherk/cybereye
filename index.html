@@ -3,87 +3,110 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>CyberEye Brain</title>
-    <link rel="manifest" href="manifest.json">
+    <title>CyberEye - 本地调试模式</title>
     <meta name="theme-color" content="#00ffcc">
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+    <!-- 引入 Google MediaPipe AI 库 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
     <style>
         body { background: #000; color: #00ffcc; font-family: 'Courier New', monospace; margin: 0; overflow: hidden; display: flex; flex-direction: column; height: 100vh; }
-        #stream { width: 100%; flex: 1; object-fit: contain; transform: scaleX(-1); background: #050505; }
-        .panel { height: 80px; background: #111; border-top: 1px solid #00ffcc; padding: 10px; font-size: 12px; }
-        .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: red; margin-right: 5px; }
+        /* 使用 video 标签，并且必须沿 X 轴翻转，否则像照镜子一样反向 */
+        #video { width: 100%; flex: 1; object-fit: cover; transform: scaleX(-1); background: #111; }
+        .panel { height: 100px; background: #050505; border-top: 2px solid #00ffcc; padding: 15px; font-size: 14px; display: flex; flex-direction: column; justify-content: center;}
+        .status-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: orange; margin-right: 8px; box-shadow: 0 0 8px orange; }
+        .highlight { color: #fff; font-weight: bold; font-size: 16px; }
     </style>
 </head>
 <body>
-    <img id="stream" src="about:blank" />
+    <!-- 本地视频容器 -->
+    <video id="video" autoplay playsinline></video>
+    
     <div class="panel">
-        <div><span id="dot" class="status-dot"></span> <span id="status">正在加载 AI 引擎...</span></div>
-        <div id="debug" style="margin-top:5px; color: #888;">坐标: X:0, Y:0 | 眨眼: 0</div>
+        <div><span id="dot" class="status-dot"></span> <span id="status">正在启动前置摄像头与 AI...</span></div>
+        <div id="debug" style="margin-top:10px; color: #888;">AI 坐标: <span class="highlight">X: 0, Y: 0</span> | 眨眼: <span class="highlight">0</span></div>
+        <div id="ws-status" style="margin-top:5px; color: #555; font-size: 12px;">[ 离线调试模式：WebSocket 未连接 ]</div>
     </div>
 
     <script>
-        const MASK_IP = "192.168.4.1";
-        const img = document.getElementById('stream');
+        const videoElement = document.getElementById('video');
         const dot = document.getElementById('dot');
         const status = document.getElementById('status');
         const debug = document.getElementById('debug');
-        let ws;
+        
         let smoothX = 0, smoothY = 0;
 
-        // 注册离线 Service Worker
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js');
-        }
-
-        // WebSocket 自动重连逻辑
-        function connect() {
-            ws = new WebSocket(`ws://${MASK_IP}:81`);
-            ws.onopen = () => {
-                dot.style.background = "#00ffcc";
-                status.innerText = "神经链接已建立 (WebSocket OK)";
-                img.src = `http://${MASK_IP}/stream`;
-            };
-            ws.onclose = () => {
+        // 1. 启动手机/电脑的前置摄像头
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'user', width: 640, height: 480 } // user 表示前置摄像头
+                });
+                videoElement.srcObject = stream;
+                
+                // 等待视频流准备好后，启动 AI 引擎
+                videoElement.onloadedmetadata = () => {
+                    videoElement.play();
+                    status.innerText = "视觉传感器已上线，等待 AI 接入...";
+                    detect(); 
+                };
+            } catch (err) {
                 dot.style.background = "red";
-                status.innerText = "链接断开，重连中...";
-                setTimeout(connect, 2000);
-            };
+                dot.style.boxShadow = "0 0 8px red";
+                status.innerText = "无法调用摄像头，请检查权限或 HTTPS 环境！";
+                console.error("Camera Error:", err);
+            }
         }
 
-        // MediaPipe FaceMesh 配置
+        // 2. 初始化 MediaPipe FaceMesh
         const faceMesh = new FaceMesh.FaceMesh({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
-        faceMesh.setOptions({ refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        faceMesh.setOptions({ 
+            refineLandmarks: true, // 必须开启，为了抓取虹膜(瞳孔)
+            minDetectionConfidence: 0.5, 
+            minTrackingConfidence: 0.5 
+        });
 
+        // 3. AI 运算回调
         faceMesh.onResults(results => {
             if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-                const p = results.multiFaceLandmarks[0][468]; 
+                // UI 状态更新
+                dot.style.background = "#00ffcc";
+                dot.style.boxShadow = "0 0 8px #00ffcc";
+                status.innerText = "AI 神经网已锁定目标";
+
+                const p = results.multiFaceLandmarks[0][468]; // 468 是右眼虹膜中心点
                 const upper = results.multiFaceLandmarks[0][159];
                 const lower = results.multiFaceLandmarks[0][145];
                 
-                // 手机端防抖平滑处理 (EMA)
+                // 原始坐标映射 (放大系数 -150 可以根据你测试时的灵敏度自己调)
                 const rawX = (p.x - 0.5) * -150;
                 const rawY = (p.y - 0.5) * -150;
+                
+                // 核心：平滑防抖算法 (EMA)
                 smoothX = smoothX * 0.6 + rawX * 0.4;
                 smoothY = smoothY * 0.6 + rawY * 0.4;
                 
+                // 眨眼判定
                 const blink = (Math.abs(upper.y - lower.y) < 0.018) ? 1 : 0;
-                debug.innerText = `坐标: X:${Math.round(smoothX)}, Y:${Math.round(smoothY)} | 眨眼: ${blink}`;
-
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(`${Math.round(smoothX)},${Math.round(smoothY)},${blink}`);
-                }
+                
+                // 渲染到屏幕上的调试面板
+                debug.innerHTML = `AI 坐标: <span class="highlight">X: ${Math.round(smoothX)}, Y: ${Math.round(smoothY)}</span> | 眨眼: <span class="highlight">${blink}</span>`;
+            } else {
+                dot.style.background = "orange";
+                dot.style.boxShadow = "0 0 8px orange";
+                status.innerText = "目标丢失，重新搜索中...";
             }
         });
 
+        // 4. 视频逐帧喂给 AI
         async function detect() {
-            if (img.complete && img.naturalWidth > 0) {
-                await faceMesh.send({image: img});
+            if (videoElement.readyState >= 2) { // 确保视频有数据
+                await faceMesh.send({image: videoElement});
             }
-            requestAnimationFrame(detect);
+            requestAnimationFrame(detect); // 满帧率循环
         }
 
-        connect();
-        detect();
+        // 启动！
+        startCamera();
     </script>
 </body>
 </html>
