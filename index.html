@@ -36,23 +36,28 @@
         let smoothX = 0, smoothY = 0;
 
         // 1. 启动手机/电脑的前置摄像头
+        // 2. 强化版启动摄像头
         async function startCamera() {
             try {
+                // 核心拦截：如果是在 file:// 下运行，mediaDevices 会直接变成 undefined
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("环境不安全 (非 HTTPS 或 localhost)，浏览器已强制没收摄像头权限！");
+                }
+
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'user', width: 640, height: 480 } // user 表示前置摄像头
+                    video: { facingMode: 'user', width: 640, height: 480 } 
                 });
                 videoElement.srcObject = stream;
                 
-                // 等待视频流准备好后，启动 AI 引擎
                 videoElement.onloadedmetadata = () => {
                     videoElement.play();
-                    status.innerText = "视觉传感器已上线，等待 AI 接入...";
+                    status.innerText = "视觉已上线，加载 AI 神经网络...";
                     detect(); 
                 };
             } catch (err) {
-                dot.style.background = "red";
-                dot.style.boxShadow = "0 0 8px red";
-                status.innerText = "无法调用摄像头，请检查权限或 HTTPS 环境！";
+                // 捕获真正的死因并打印到屏幕上
+                dot.style.background = "red"; dot.style.boxShadow = "0 0 8px red";
+                status.innerText = "调用失败：" + err.message;
                 console.error("Camera Error:", err);
             }
         }
